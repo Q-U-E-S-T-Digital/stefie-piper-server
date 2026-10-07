@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+piper_env/
+*.log
+
+# voice models: deployed by copy on the box, never committed
+*.onnx
+*.onnx.json
+!voices/.gitkeep

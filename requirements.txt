@@ -1,0 +1,9 @@
+# Pinned to ~/piper/piper_env on the Oracle box (2026-10-07).
+# Plain uvicorn (no [standard] extras): mirrors the known-working env,
+# avoids uvloop/httptools surprises on aarch64.
+fastapi==0.141.1
+uvicorn==0.52.4
+piper-tts==1.7.0
+onnxruntime==1.23.2
+pydantic==2.13.5
+pydantic_core==2.46.5
