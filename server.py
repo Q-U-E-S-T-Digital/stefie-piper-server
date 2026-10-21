@@ -14,17 +14,44 @@ Run:
 
 import asyncio
 import io
+import os
 import time
 import wave
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, Query
+from fastapi import Body, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 import voices
+
+
+def _load_dotenv(path: str) -> None:
+    """Load a .env file into os.environ (no external dependency)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except FileNotFoundError:
+        pass
+
+
+# Load local .env so STEFIE_BOOT_TOKEN (and other secrets) are available
+# when running with `uvicorn server:app` directly.
+_load_dotenv(Path(__file__).with_name(".env"))
 
 app = FastAPI(title="Stefie Piper TTS Server")
 
@@ -36,6 +63,22 @@ LEGACY_MAX_CHARS = 500  # GET URLs were never meant for paragraphs
 # processes) are enough to keep the event loop unblocked while staying
 # pickle-free. If CPU saturates, scale with `--workers 2..4` instead.
 _pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="piper")
+
+# Model download endpoints reuse the same boot token the desktop app sends
+# to the Cloudflare relay /config endpoint. If STEFIE_BOOT_TOKEN is not set
+# on the server, all model endpoints fail closed (401) — never allow all.
+MODEL_SERVER_TOKEN = os.getenv("STEFIE_BOOT_TOKEN", "")
+
+
+def _check_auth(authorization: str | None):
+    """Require Bearer <STEFIE_BOOT_TOKEN> on model endpoints.
+
+    Fails closed when STEFIE_BOOT_TOKEN is not configured on the server.
+    """
+    if not MODEL_SERVER_TOKEN:
+        raise HTTPException(status_code=401, detail="server not configured")
+    if authorization != f"Bearer {MODEL_SERVER_TOKEN}":
+        raise HTTPException(status_code=401, detail="unauthorized")
 
 
 class SynthesizeRequest(BaseModel):
@@ -142,6 +185,44 @@ async def synthesize(req: SynthesizeRequest):
             "X-Synth-Ms": str(ms),
             "X-Audio-Bytes": str(len(data)),
             "X-Voice-Model": model_name,
+        },
+    )
+
+
+@app.get("/models")
+def list_available_models(authorization: str | None = Header(default=None)):
+    """List available Piper model .onnx + .json pairs on the server."""
+    _check_auth(authorization)
+    return {"models": voices.list_models()}
+
+
+@app.post("/models/download")
+def download_model(
+    language: str = Body(...),
+    speaker: str = Body(...),
+    level: str = Body(...),
+    authorization: str | None = Header(default=None),
+):
+    """Download a Piper model pair as a ZIP containing .onnx + .onnx.json."""
+    _check_auth(authorization)
+    match = voices.find_model_file(language, speaker, level)
+    if not match:
+        raise HTTPException(status_code=404, detail="model not found")
+    onnx_path = voices.VOICES_DIR / match["onnx_file"]
+    json_path = voices.VOICES_DIR / match["json_file"]
+    if not onnx_path.is_file() or not json_path.is_file():
+        raise HTTPException(status_code=404, detail="model files missing on disk")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(onnx_path, arcname=match["onnx_file"])
+        z.write(json_path, arcname=match["json_file"])
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{match["onnx_file"]}.zip"',
         },
     )
 

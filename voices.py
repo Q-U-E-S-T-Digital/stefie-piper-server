@@ -7,6 +7,7 @@ is actually on disk, instead of a bare traceback.
 """
 
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -22,6 +23,11 @@ MODEL_FILES: dict[str, list[str]] = {
     "fr": ["fr_FR-tom-medium.onnx"],
     "sw": ["sw_CD-lanfrica-medium.onnx"],
 }
+
+# Piper filename convention: <lang>_<REGION>-<speaker>-<level>.onnx
+# e.g. es_ES-sharvard-medium.onnx -> language=es, speaker=sharvard, level=medium
+_PIPER_NAME_RE = re.compile(r"^([a-z]{2})_[A-Z]{2}-(.+)-(.+)\.onnx$")
+
 
 _lock = threading.Lock()
 _voices: dict[str, PiperVoice] = {}
@@ -43,6 +49,40 @@ def available_files() -> list[str]:
     if not VOICES_DIR.is_dir():
         return []
     return sorted(p.name for p in VOICES_DIR.glob("*.onnx"))
+
+
+def list_models() -> list[dict]:
+    """Discover Piper model pairs in VOICES_DIR.
+
+    Returns a list of dicts with keys: language, speaker, level,
+    onnx_file, json_file. Files that don't match the Piper naming
+    convention are skipped.
+    """
+    if not VOICES_DIR.is_dir():
+        return []
+    models = []
+    for onnx in sorted(VOICES_DIR.glob("*.onnx")):
+        m = _PIPER_NAME_RE.match(onnx.name)
+        if not m:
+            continue
+        language, speaker, level = m.group(1), m.group(2), m.group(3)
+        models.append({
+            "language": language,
+            "speaker": speaker,
+            "level": level,
+            "onnx_file": onnx.name,
+            "json_file": onnx.name + ".json",
+        })
+    return models
+
+
+def find_model_file(language: str, speaker: str, level: str) -> dict | None:
+    """Return {onnx_file, json_file} for a matching model pair, or None."""
+    for m in list_models():
+        if (m["language"] == language and m["speaker"] == speaker
+                and m["level"] == level):
+            return {"onnx_file": m["onnx_file"], "json_file": m["json_file"]}
+    return None
 
 
 def available_langs() -> list[str]:
